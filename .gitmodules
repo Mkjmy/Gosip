@@ -1,0 +1,6 @@
+[submodule "registry"]
+	path = registry
+	url = https://github.com/Mkjmy/-buddystore-registry-
+[submodule "gosip-registry"]
+	path = gosip-registry
+	url = https://github.com/Mkjmy/gosip-registry
