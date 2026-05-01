@@ -1,0 +1,5 @@
+# Ignore internal documentation
+SYSDOC.md
+
+# Go binaries
+buddy-store
