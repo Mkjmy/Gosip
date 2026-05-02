@@ -22,17 +22,23 @@ def main():
     # 1. Handle Submodule (Registry)
     registry_dir = "gosip-registry"
     if os.path.exists(os.path.join(registry_dir, ".git")):
-        print("\n\033[32m[1/3] Updating Registry Submodule...\033[0m")
+        print("\n\033[32m[1/3] Synchronizing Registry Submodule...\033[0m")
 
         # Ensure we are on main branch
         run_command(["git", "checkout", "main"], cwd=registry_dir)
+        
+        # SELECTIVE UPDATE: Only pull community.json to avoid overwriting local registry.json
+        print("  (Fetching latest remote state...)")
+        run_command(["git", "fetch", "origin", "main"], cwd=registry_dir)
+        print("  (Updating ONLY community.json, protecting your registry.json...)")
+        run_command(["git", "checkout", "origin/main", "--", "community.json"], cwd=registry_dir)
 
         run_command(["git", "add", "."], cwd=registry_dir)
         # Try to commit, but don't fail if there's nothing to commit
         try:
             subprocess.run(["git", "commit", "-m", commit_msg], cwd=registry_dir, check=True)
         except subprocess.CalledProcessError:
-            print("  (No changes to commit in registry)")
+            print("  (No new local changes to commit in registry)")
 
         run_command(["git", "push", "origin", "main"], cwd=registry_dir)
     else:
