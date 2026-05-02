@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -183,7 +184,63 @@ func checkDependencies(deps []string) bool {
 func auditApp(app registry.App) {
 	fmt.Println()
 	Yellow.Println(" [!] AUDIT_MODE: INSPECTING_LOGIC")
-	printAppReportDetailed(app, "AUDIT", true, "")
+	printAppReportDetailed(app, "AUDIT", true, "", nil)
+}
+
+func checkBinaryBlobs(dir string) []string {
+	var blobs []string
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() { return nil }
+		if strings.HasPrefix(filepath.Base(path), ".") { return nil } // Skip .git etc
+		
+		// Check for common binary extensions
+		ext := strings.ToLower(filepath.Ext(path))
+		binaryExts := map[string]bool{".exe": true, ".so": true, ".dll": true, ".bin": true, ".pyc": true}
+		if binaryExts[ext] {
+			blobs = append(blobs, path)
+			return nil
+		}
+
+		// Use 'file' command to check if it's an executable
+		out, _ := exec.Command("file", path).Output()
+		if strings.Contains(string(out), "executable") || strings.Contains(string(out), "shared object") {
+			// Double check if it's not a shell script
+			if !strings.Contains(string(out), "script") {
+				blobs = append(blobs, path)
+			}
+		}
+		return nil
+	})
+	return blobs
+}
+
+func detectBuildSystem(dir string) string {
+	systems := map[string]string{
+		"Makefile":     "Make",
+		"go.mod":       "Go",
+		"package.json": "Node.js",
+		"Cargo.toml":   "Rust",
+		"CMakeLists.txt": "CMake",
+		"setup.py":     "Python",
+		"build.gradle": "Gradle",
+	}
+	for file, name := range systems {
+		if _, err := os.Stat(filepath.Join(dir, file)); err == nil {
+			return name
+		}
+	}
+	return "None Detected"
+}
+
+func checkLicense(dir string) string {
+	files, _ := os.ReadDir(dir)
+	for _, f := range files {
+		name := strings.ToUpper(f.Name())
+		if strings.Contains(name, "LICENSE") || strings.Contains(name, "COPYING") {
+			return f.Name()
+		}
+	}
+	return "Missing"
 }
 
 func installApp(app registry.App) {
@@ -218,11 +275,12 @@ func installApp(app registry.App) {
 	}
 
 	fmt.Println()
-	doneScan, waitScan := make(chan bool), make(chan bool)
-	go registry.ShowDynamicProgress("SECURITY_AUDITING", doneScan, waitScan)
-	time.Sleep(1000 * time.Millisecond)
+	doneAudit, waitAudit := make(chan bool), make(chan bool)
+	go registry.ShowDynamicProgress("DEEP_AUDITING", doneAudit, waitAudit)
+	
+	// 1. Malicious Pattern Scan
 	var threats []string
-	patterns := []string{"rm -rf /", "curl.*\\|.*sh", "wget.*\\|.*sh", "> /etc/", "chmod +x /"}
+	patterns := []string{"rm -rf /", "curl.*\\|.*sh", "wget.*\\|.*sh", "> /etc/", "chmod +x /", "sudo ", "systemctl ", "crontab "}
 	for _, p := range patterns {
 		cmd := exec.Command("grep", "-rInE", p, tmpPath)
 		output, _ := cmd.CombinedOutput()
@@ -235,26 +293,74 @@ func installApp(app registry.App) {
 			}
 		}
 	}
-	doneScan <- true
-	<-waitScan
+
+	// 2. Binary Blob Detection
+	blobs := checkBinaryBlobs(tmpPath)
+	
+	// 3. Build System & License
+	buildSys := detectBuildSystem(tmpPath)
+	license := checkLicense(tmpPath)
+	
+	time.Sleep(800 * time.Millisecond)
+	doneAudit <- true
+	<-waitAudit
+
+	// DISPLAY DEEP AUDIT REPORT
+	fmt.Println()
+	auditBoxColor := Cyan
+	if len(threats) > 0 || len(blobs) > 0 { auditBoxColor = Red } else if license == "Missing" { auditBoxColor = Yellow }
+	
+	auditWidth := 63
+	statusLogic := Green.Sprint("[✓] CLEAN")
+	if len(threats) > 0 { statusLogic = Red.Sprint("[!] SUSPICIOUS_PATTERNS_FOUND") }
+	
+	statusSrc := Green.Sprint("[✓] SOURCE_ONLY")
+	if len(blobs) > 0 { statusSrc = Yellow.Sprint("[!] BINARY_BLOBS_DETECTED (Non-OSS?)") }
+	
+	statusLic := Green.Sprint("[✓] " + license)
+	if license == "Missing" { statusLic = Yellow.Sprint("[!] MISSING_LICENSE") }
+
+	drawBoxBorder(auditBoxColor, "DEEP_AUDIT_REPORT", "┏", auditWidth)
+	printBoxLine(auditBoxColor, "LOGIC", statusLogic, auditWidth)
+	printBoxLine(auditBoxColor, "INTEGRITY", statusSrc, auditWidth)
+	printBoxLine(auditBoxColor, "BUILD", Blue.Sprint(buildSys), auditWidth)
+	printBoxLine(auditBoxColor, "LICENSE", statusLic, auditWidth)
+	drawBoxBorder(auditBoxColor, "", "┗", auditWidth)
+
+	auditResult := &AuditSummary{
+		Logic:     statusLogic,
+		Integrity: statusSrc,
+		Build:     Blue.Sprint(buildSys),
+		License:   statusLic,
+	}
 
 	if len(threats) > 0 {
 		Red.Println("\n  [!] SECURITY_ALERT: SUSPICIOUS_LOGIC_IDENTIFIED")
-		fmt.Println(Red.Sprint("  ┌─ THREAT_REPORT ──────────────────────────────────────────┐"))
 		for i, t := range threats {
-			if i >= 5 { fmt.Printf("  │ ... and %d more threats.                                 │\n", len(threats)-5); break }
-			parts := strings.SplitN(t, ":", 3)
-			if len(parts) == 3 {
-				fileName := parts[0]
-				if len(fileName) > 20 { fileName = "..." + fileName[len(fileName)-17:] }
-				fmt.Printf("  │ %s:%-4s %-32s │\n", Pink.Sprint(fileName), Yellow.Sprint(parts[1]), Red.Sprint(truncateString(parts[2], 32)))
-			}
-		}
-		fmt.Println(Red.Sprint("  └──────────────────────────────────────────────────────────┘"))
-		if !customConfirm("POTENTIAL EXPLOIT FOUND. DISREGARD AND CONTINUE?") {
-			os.RemoveAll(tmpPath); Yellow.Println("\n  [!] INSTALLATION_ABORTED: Security risk rejected."); waitReturn(); return
+			if i >= 3 { fmt.Printf("  ... and %d more.\n", len(threats)-3); break }
+			fmt.Printf("  - %s\n", Red.Sprint(truncateString(t, 60)))
 		}
 	}
+	
+	if len(blobs) > 0 {
+		Yellow.Println("\n  [!] WARNING: Compiled binaries found in source repository.")
+		for i, b := range blobs {
+			if i >= 3 { fmt.Printf("  ... and %d more.\n", len(blobs)-3); break }
+			fmt.Printf("  - %s\n", Yellow.Sprint(filepath.Base(b)))
+		}
+	}
+
+	fmt.Println()
+	if !customConfirm("CONTINUE WITH SYSTEM DEPLOYMENT?") {
+		os.RemoveAll(tmpPath); Yellow.Println("\n  [!] INSTALLATION_ABORTED."); waitReturn(); return
+	}
+
+	// CLEAR AUDIT BOX AND WARNINGS
+	linesToClear := 6 // Audit box
+	if len(threats) > 0 { linesToClear += 2 + int(math.Min(float64(len(threats)), 3)) }
+	if len(blobs) > 0 { linesToClear += 2 + int(math.Min(float64(len(blobs)), 3)) }
+	linesToClear += 3 // Confirm question + extra spaces
+	clearLines(linesToClear)
 
 	targetPath := customInput("DEPLOYMENT_TARGET", registry.ExpandPath(app.TargetPath, homeDir))
 	if !checkDependencies(app.Dependencies) {
@@ -361,7 +467,7 @@ func installApp(app registry.App) {
 		f.WriteString("---\n"); f.Close()
 	}
 
-	printAppReportDetailed(app, "INSTALLATION_SUCCESS", buildExecuted, backupPath)
+	printAppReportDetailed(app, "INSTALLATION_SUCCESS", buildExecuted, backupPath, auditResult)
 	authorName := "Unknown Hacker"; parts := strings.Split(app.Repo, "/")
 	if len(parts) > 0 { authorName = parts[0] }
 	if app.AuthorNote != "" {

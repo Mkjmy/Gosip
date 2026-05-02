@@ -30,6 +30,7 @@ var (
 	Red    = CustomColor{"\033[31m"}
 	Blue   = CustomColor{"\033[34m"}
 	HiWhite = "\033[97m"
+	White  = "\033[37m"
 )
 
 func readKey() string {
@@ -140,8 +141,11 @@ func wrapText(text string, limit int) string {
 }
 
 func truncateString(s string, max int) string {
-	if len(s) <= max { return s }
-	return s[:max-3] + "..."
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max-3]) + "..."
 }
 
 func printGridLine(label, value string, labelColor CustomColor, width int) {
@@ -162,8 +166,15 @@ func printGridLineDetailed(label, value string, labelColor CustomColor, width in
 	Blue.Println("│")
 }
 
-func printAppReportDetailed(app registry.App, title string, buildExecuted bool, backupPath string) {
-	width := 61
+type AuditSummary struct {
+	Logic     string
+	Integrity string
+	Build     string
+	License   string
+}
+
+func printAppReportDetailed(app registry.App, title string, buildExecuted bool, backupPath string, audit *AuditSummary) {
+	width := 63
 	boxColor := Blue
 	if title == "AUDIT" { boxColor = Yellow }
 	if !buildExecuted && title != "AUDIT" { boxColor = Green }
@@ -173,39 +184,163 @@ func printAppReportDetailed(app registry.App, title string, buildExecuted bool, 
 	headerText := fmt.Sprintf(" %s // %s ", title, app.Name)
 	boxColor.Print("  ┌─" + headerText)
 	// Calculate exact line to fill the width
-	headerLen := utf8.RuneCountInString(headerText)
+	headerLen := visibleLen(headerText)
 	boxColor.Println(strings.Repeat("─", width-headerLen-5) + "┐")
 
 	// Core Identity Block
-	printGridLineDetailed("IDENTITY:", app.Name+" ("+app.Version+")", Pink, width)
+	printBoxLine(boxColor, "IDENTITY", app.Name+" ("+app.Version+")", width)
 	
 	target := registry.ExpandPath(app.TargetPath, homeDir)
 	if app.Type != "git-config" {
 		target = filepath.Join(binDir, app.BinaryName)
 	}
-	printGridLineDetailed("LOCATION:", target, Pink, width)
+	printBoxLine(boxColor, "LOCATION", target, width)
 
 	if backupPath != "" {
-		printGridLineDetailed("BACKUP_LOC:", truncateString(backupPath, 45), Pink, width)
+		printBoxLine(boxColor, "BACKUP_LOC", truncateString(backupPath, 45), width)
 	}
 
 	// Extended Info for Audits
 	if title == "AUDIT" {
-		printGridLineDetailed("SOURCE:  ", "github.com/"+app.Repo, Pink, width)
+		printBoxLine(boxColor, "SOURCE", "github.com/"+app.Repo, width)
 		deps := strings.Join(app.Dependencies, ", ")
 		if deps == "" { deps = "None" }
-		printGridLineDetailed("REQS:    ", deps, Pink, width)
+		printBoxLine(boxColor, "REQS", deps, width)
+	}
+
+	// Deep Audit Summary Block
+	if audit != nil {
+		boxColor.Print("  ├─ AUDIT_REPORT ")
+		boxColor.Println(strings.Repeat("─", width-19) + "┤")
+		printBoxLine(boxColor, "LOGIC", audit.Logic, width)
+		printBoxLine(boxColor, "INTEGRITY", audit.Integrity, width)
+		printBoxLine(boxColor, "BUILD", audit.Build, width)
+		printBoxLine(boxColor, "LICENSE", audit.License, width)
 	}
 
 	// Provisioning Info Block
 	if buildExecuted && app.PostInstall != "" {
 		boxColor.Print("  ├─ PROVISIONING ")
 		boxColor.Println(strings.Repeat("─", width-19) + "┤")
-		printGridLineDetailed("STATUS:  ", "EXECUTED_SUCCESSFULLY", Pink, width)
-		printGridLineDetailed("LOGIC:   ", truncateString(app.PostInstall, 45), Pink, width)
+		printBoxLine(boxColor, "STATUS", "EXECUTED_SUCCESSFULLY", width)
+		printBoxLine(boxColor, "LOGIC", truncateString(app.PostInstall, 45), width)
 	}
 
 	boxColor.Println("  └" + strings.Repeat("─", width-4) + "┘")
+}
+
+func visibleLen(s string) int {
+	// Strip ANSI escape codes to calculate visible length
+	inCode := false
+	count := 0
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == 27 { // ESC
+			inCode = true
+			continue
+		}
+		if inCode {
+			if (runes[i] >= 'a' && runes[i] <= 'z') || (runes[i] >= 'A' && runes[i] <= 'Z') {
+				inCode = false
+			}
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+func drawBoxBorder(boxColor CustomColor, title, pos string, width int) {
+	fmt.Print("  " + boxColor.Sprint(pos))
+	
+	// Total horizontal available = width - 2 (leading spaces) - 2 (corners) = width - 4
+	horizontalWidth := width - 4
+	
+	if title != "" {
+		fmt.Print(boxColor.Sprint("━ "))
+		fmt.Print(HiWhite + title + " ")
+		used := visibleLen(title) + 3 // "━ " (2) + title + " " (1)
+		if used < horizontalWidth {
+			fmt.Print(boxColor.Sprint(strings.Repeat("━", horizontalWidth-used)))
+		}
+	} else {
+		fmt.Print(boxColor.Sprint(strings.Repeat("━", horizontalWidth)))
+	}
+	
+	end := "┓"
+	if pos == "┗" { end = "┛" }
+	fmt.Println(boxColor.Sprint(end))
+}
+
+func printBoxLine(boxColor CustomColor, label, value string, width int) {
+	labelPart := "  " + label + ": "
+	prefixLen := visibleLen(labelPart)
+	
+	// Total available = width - 2 (leading spaces) - 1 (┃) - prefixLen - 1 (space before ┃) - 1 (┃)
+	contentArea := width - 5 - prefixLen
+	
+	finalValue := truncateString(value, contentArea)
+	vLen := visibleLen(finalValue)
+	
+	padding := ""
+	if vLen < contentArea {
+		padding = strings.Repeat(" ", contentArea-vLen)
+	}
+	
+	fmt.Print("  " + boxColor.Sprint("┃") + labelPart + finalValue + padding + " " + boxColor.Sprint("┃") + "\n")
+}
+
+func printBoxWrapped(boxColor CustomColor, label, value string, width int) {
+	labelPart := "  " + label + ": "
+	prefixLen := visibleLen(labelPart)
+	contentArea := width - 5 - prefixLen
+
+	if visibleLen(value) <= contentArea {
+		printBoxLine(boxColor, label, value, width)
+		return
+	}
+
+	var lines []string
+	words := strings.Fields(value)
+	currentLine := ""
+	
+	for _, word := range words {
+		testLine := currentLine
+		if testLine != "" {
+			testLine += " "
+		}
+		testLine += word
+		
+		if visibleLen(testLine) > contentArea {
+			if currentLine != "" {
+				lines = append(lines, currentLine)
+				currentLine = word
+			} else {
+				// Word itself is too long, force truncate it to avoid infinite loop
+				lines = append(lines, truncateString(word, contentArea))
+				currentLine = ""
+			}
+		} else {
+			currentLine = testLine
+		}
+	}
+	if currentLine != "" {
+		lines = append(lines, currentLine)
+	}
+
+	for i, line := range lines {
+		lPart := labelPart
+		if i > 0 {
+			lPart = strings.Repeat(" ", prefixLen)
+		}
+		
+		vLen := visibleLen(line)
+		padding := ""
+		if vLen < contentArea {
+			padding = strings.Repeat(" ", contentArea-vLen)
+		}
+		fmt.Print("  " + boxColor.Sprint("┃") + lPart + line + padding + " " + boxColor.Sprint("┃") + "\n")
+	}
 }
 
 func customSelect(apps []registry.App) (int, bool) {
@@ -261,7 +396,21 @@ func customSelect(apps []registry.App) (int, bool) {
 		
 		fmt.Print("\033[H\033[2J") // Clear
 		printBanner()
-		
+
+		Purple.Println(" ┌──────────────────────────────────────────────────────────┐")
+		Purple.Print(" │ ")
+		fmt.Printf("%-56s", "GOSIP OS // SYSTEM_V3.0")
+		Purple.Println(" │")
+		Purple.Print(" │ ")
+		if activeTab == 0 {
+			fmt.Printf("%-56s", "STATUS: ONLINE | REGISTRY_UNITS: "+fmt.Sprint(len(apps)))
+		} else {
+			fmt.Printf("%-56s", "STATUS: LOCAL_STATION | DEPLOYED_UNITS: "+fmt.Sprint(len(installedApps)))
+		}
+		Purple.Println(" │")
+		Purple.Println(" └──────────────────────────────────────────────────────────┘")
+		fmt.Println()
+
 		// Tab Header Area
 		fmt.Print("  ")
 		if activeTab == 0 {
@@ -269,46 +418,42 @@ func customSelect(apps []registry.App) (int, bool) {
 		} else {
 			fmt.Printf("%s   %s\n", HiWhite+"[ CORE_REGISTRY ]", Pink.Sprint("▰▰ [ LOCAL_UNITS ] ▰▰"))
 		}
-		
-		Purple.Println(" ┌──────────────────────────────────────────────────────────┐")
-		Purple.Print(" │ ")
-		fmt.Printf("%-56s", "GOSIP OS // CORE_SYSTEM_V3.0")
-		Purple.Println(" │")
-		Purple.Println(" └──────────────────────────────────────────────────────────┘")
-		
+		fmt.Println()
+
 		if activeTab == 0 {
 			fmt.Printf("  %s %s%s\n", Cyan.Sprint("[SEARCH_REGISTRY]:"), HiWhite, filter+"_")
-		} else {
-			Pink.Printf("  [INSTALLED_UNITS]: %d units found\n", len(installedApps))
+			fmt.Println()
 		}
 
-		fmt.Println()
 		if activeTab == 0 {
 			// Render Registry Tab
 			if len(filtered) == 0 { Red.Println("    [!] NO_MATCHES_FOUND") }
 			for i, app := range filtered {
-				statusNote := ""
+				statusIcon := White + "[○]"
+				statusText := "AVAILABLE"
+				statusColor := Blue
 				if state, exists := allStates[app.Name]; exists {
 					if state.Version == app.Version {
-						statusNote = Green.Sprint(" [INSTALLED]")
+						statusIcon = Green.Sprint("[●]")
+						statusText = "SYSTEM_READY"
+						statusColor = Green
 					} else {
-						statusNote = Yellow.Sprint(" [UPDATE_AVAIL]")
+						statusIcon = Yellow.Sprint("[!]")
+						statusText = "UPDATE_AVAIL"
+						statusColor = Yellow
 					}
 				}
 
 				if i == selected {
-					fmt.Print("  ")
-					if app.IsOfficial { Cyan.Print("▶ ") } else { Yellow.Print("▶ ") }
-					Purple.Print("[ ")
-					fmt.Printf("%s%-20s", HiWhite, app.Name)
-					Purple.Print(" ]")
-					fmt.Print(statusNote, "  ")
-					if app.IsOfficial { Blue.Println("← SYSTEM_READY") } else { Yellow.Println("← [!] UNVERIFIED") }
+					fmt.Print("  " + Cyan.Sprint("➤ "))
+					fmt.Printf("%s %s %s %s %s\n", 
+						Cyan.Sprint("["), 
+						HiWhite+app.Name+" "+Pink.Sprint("("+app.Version+")"), 
+						Cyan.Sprint("]"),
+						statusIcon,
+						statusColor.Sprint(statusText))
 				} else {
-					nameWidth := utf8.RuneCountInString(app.Name)
-					fmt.Printf("    %s", app.Name)
-					if nameWidth < 20 { fmt.Print(strings.Repeat(" ", 20-nameWidth)) }
-					fmt.Print(statusNote, "    \n")
+					fmt.Printf("    \033[2m%s (%s) %s %s\033[0m\n", app.Name, app.Version, "[○]", statusText)
 				}
 			}
 		} else {
@@ -316,24 +461,64 @@ func customSelect(apps []registry.App) (int, bool) {
 			if len(installedApps) == 0 { Yellow.Println("    [!] NO_UNITS_DEPLOYED_YET") }
 			for i, app := range installedApps {
 				if i == selected {
-					fmt.Printf("  %s %s (%s)\n", Pink.Sprint("▶"), HiWhite+app.Name, Green.Sprint(app.Version))
-					fmt.Printf("    %s %s\n", Blue.Sprint("└─"), Yellow.Sprint(truncateString(app.InstallPath, 45)))
+					fmt.Print("  " + Pink.Sprint("➤ "))
+					fmt.Printf("%s %s %s\n", 
+						Pink.Sprint("["), 
+						HiWhite+app.Name+" "+Green.Sprint("("+app.Version+")"), 
+						Pink.Sprint("]"))
 				} else {
-					fmt.Printf("    %s %s\n", app.Name, Blue.Sprint("("+app.Version+")"))
+					fmt.Printf("    \033[2m%s (%s)\033[0m\n", app.Name, app.Version)
 				}
 			}
 		}
 
-		// Information Panel for Registry
+		// Information Panel at the bottom
+		fmt.Println()
+		var currentApp *registry.App
 		if activeTab == 0 && len(filtered) > 0 {
-			app := filtered[selected]
-			fmt.Println()
-			Blue.Println(" ┌─ AUDIT_LOG ──────────────────────────────────────────────┐")
-			printGridLine("SOURCE:  ", "github.com/"+app.Repo, Pink, 61)
-			printGridLine("VERSION: ", app.Version, Pink, 61)
-			Blue.Println(" └──────────────────────────────────────────────────────────┘")
+			currentApp = &filtered[selected]
 		}
 		
+		boxWidth := 63
+		if currentApp != nil {
+			boxColor := Cyan
+			if !currentApp.IsOfficial { boxColor = Yellow }
+			
+			statusIcon := White + "[○]"
+			statusText := "AVAILABLE"
+			statusColor := Blue
+			if state, exists := allStates[currentApp.Name]; exists {
+				if state.Version == currentApp.Version {
+					statusIcon = Green.Sprint("[●]")
+					statusText = "SYSTEM_READY"
+					statusColor = Green
+				} else {
+					statusIcon = Yellow.Sprint("[!]")
+					statusText = "UPDATE_AVAIL"
+					statusColor = Yellow
+				}
+			}
+
+			drawBoxBorder(boxColor, "INFO", "┏", boxWidth)
+			printBoxWrapped(boxColor, "DESC", currentApp.Description, boxWidth)
+			printBoxLine(boxColor, "REPO", "github.com/"+currentApp.Repo, boxWidth)
+			
+			statusBase := fmt.Sprintf("%-7s %s", statusIcon, statusColor.Sprint(statusText))
+			printBoxLine(boxColor, "STAT", statusBase, boxWidth)
+			
+			drawBoxBorder(boxColor, "", "┗", boxWidth)
+		} else if activeTab == 1 && len(installedApps) > 0 {
+			app := installedApps[selected]
+			drawBoxBorder(Pink, "DEPLOYMENT_INFO", "┏", boxWidth)
+			
+			printBoxLine(Pink, "NAME", app.Name+" ("+app.Version+")", boxWidth)
+			printBoxWrapped(Pink, "PATH", app.InstallPath, boxWidth)
+			printBoxLine(Pink, "DATE", app.InstallDate, boxWidth)
+			
+			drawBoxBorder(Pink, "", "┗", boxWidth)
+		}
+
+		// Bottom Controls Info
 		fmt.Print("\n  ", Cyan.Sprint("[TAB]"), " Switch Tab  ", Cyan.Sprint("[UP/DOWN]"), " Nav  ", Red.Sprint("[CTRL+C]"), " Abort")
 		if activeTab == 0 {
 			fmt.Print("  ", Cyan.Sprint("[ENTER]"), " Install  ", Yellow.Sprint("[S]"), " Shadow")
