@@ -2,6 +2,8 @@
 
 A custom package manager for Linux built primarily because standard tools were too efficient and didn't look enough like a 90s hacker movie.
 
+![GOSIP System Interface](screenshot.png)
+
 ## Technical Details
 
 1. Hybrid UI: An inline TUI menu that lives in your terminal scrollback. During installation, it switches to an Alternate Screen Buffer because watching progress bars is a full-screen experience.
