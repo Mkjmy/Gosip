@@ -1,5 +1,18 @@
 package registry
 
+/*
+ * GOSIP REGISTRY - UTILITIES
+ * --------------------------
+ * File: internal/registry/utils.go
+ * Purpose: Helper functions for file management, state persistence, and progress visualization.
+ *
+ * Sections:
+ * - [15-30]: Path Manipulation & Backups
+ * - [32-68]: State Management (Save/Get/Remove installed apps state)
+ * - [70-150]: Progress Visualization (Dynamic Progress Bars, Download Counters)
+ * - [152-165]: Network Helpers (GitHub repo validation)
+ */
+
 import (
 	"encoding/json"
 	"fmt"
@@ -96,39 +109,64 @@ func (wc *WriteCounter) printProgress() {
 	if wc.Current == wc.Total { fmt.Println() }
 }
 
-func ShowDynamicProgress(label string, done chan bool, wait chan bool) {
+func ShowDynamicProgress(label string) (chan bool, chan bool) {
+	done := make(chan bool)
+	wait := make(chan bool)
 	width := 30
-	percent := 0
-	ticker := time.NewTicker(80 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-done:
-			for {
-				if percent > 100 {
-					percent = 100
-				}
-				bar := strings.Repeat("█", (percent*width)/100) + strings.Repeat("░", width-(percent*width)/100)
-				fmt.Printf("\r  %-20s [%s] %d%%", label, bar, percent)
-				
-				if percent == 100 {
-					break
-				}
-				percent += 10
-				time.Sleep(15 * time.Millisecond)
+	
+	go func() {
+		percent := 0
+		baseDelay := 60 * time.Millisecond
+		
+		finish := func(curr int) {
+			for p := curr; p <= 100; p++ {
+				bar := strings.Repeat("█", (p*width)/100) + strings.Repeat("░", width-(p*width)/100)
+				fmt.Printf("\r  %-20s [%s] %d%%", label, bar, p)
+				time.Sleep(5 * time.Millisecond)
 			}
-			fmt.Println()
+			fmt.Println() // End the line properly
 			wait <- true
-			return
-		case <-ticker.C:
-			if percent < 95 {
-				percent++
-				bar := strings.Repeat("█", (percent*width)/100) + strings.Repeat("░", width-(percent*width)/100)
-				fmt.Printf("\r  %-20s [%s] %d%%", label, bar, percent)
+		}
+
+		for {
+			select {
+			case <-done:
+				finish(percent)
+				return
+			default:
+				if percent < 99 {
+					percent++
+					
+					delay := baseDelay
+					if percent > 50 { delay = time.Duration(float64(baseDelay) * 1.5) }
+					if percent > 75 { delay = time.Duration(float64(baseDelay) * 3) }
+					if percent > 85 { delay = time.Duration(float64(baseDelay) * 6) }
+					if percent > 92 { delay = time.Duration(float64(baseDelay) * 15) }
+					if percent > 97 { delay = time.Duration(float64(baseDelay) * 40) }
+
+					bar := strings.Repeat("█", (percent*width)/100) + strings.Repeat("░", width-(percent*width)/100)
+					fmt.Printf("\r  %-20s [%s] %d%%", label, bar, percent)
+					
+					innerTicker := time.NewTicker(delay)
+					select {
+					case <-done:
+						innerTicker.Stop()
+						finish(percent)
+						return
+					case <-innerTicker.C:
+						innerTicker.Stop()
+					}
+				} else {
+					// Stall at 99% and wait for the actual finish signal
+					<-done
+					finish(99)
+					return
+				}
 			}
 		}
-	}
+	}()
+	
+	return done, wait
 }
 
 func CheckRepoExists(repo string) bool {

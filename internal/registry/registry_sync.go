@@ -1,39 +1,50 @@
 package registry
 
+/*
+ * GOSIP REGISTRY - SYNCHRONIZATION
+ * --------------------------------
+ * File: internal/registry/registry_sync.go
+ * Purpose: Handles fetching and updating registry data from remote sources.
+ *
+ * Sections:
+ * - [16-65]: Synchronization Logic (HTTP fetching with Cache-busting)
+ * - [67-85]: File-system persistence for registry JSONs
+ * - [87-120]: Version Checking (Pending updates for apps)
+ * - [122-150]: Core Application Self-Update Checking
+ */
+
 import (
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
-// SyncRegistry handles the synchronization of official and community registries.
-func SyncRegistry(defaultRegistry, communityRegistry, registryFile, communityFile, stateFile string, CurrentVersion string) {
-	localSubmodulePath := "gosip-registry"
-
-	if _, err := os.Stat(filepath.Join(localSubmodulePath, ".git")); err == nil {
-		fmt.Println(" [SYS] SUBMODULE_DETECTED: Updating via Git...")
+// SyncRegistry handles the synchronization of all configured registries.
+func SyncRegistry(sources []RegistrySource, baseDir, stateFile, CurrentVersion string) {
+	for _, src := range sources {
+		destFile := filepath.Join(baseDir, src.File)
+		fmt.Printf(" [SYS] SYNCING_%s... ", strings.ToUpper(src.Name))
 		
-		cmd := exec.Command("git", "submodule", "update", "--remote", "--merge")
-		err := cmd.Run()
-		
-		if err == nil {
-			fmt.Println(" [✓] Submodule updated to latest.")
-			
-			copyRegistryFile(filepath.Join(localSubmodulePath, "registry.json"), registryFile)
-			copyRegistryFile(filepath.Join(localSubmodulePath, "community.json"), communityFile)
-			
-			checkMainAppUpdate(registryFile, stateFile, CurrentVersion)
-			return
+		cacheBuster := fmt.Sprintf("?t=%d", time.Now().Unix())
+		if downloadToConfig(src.URL+cacheBuster, destFile) {
+			fmt.Println("SUCCESS")
+		} else {
+			fmt.Println("FAILED")
 		}
-		fmt.Println(" [!] Git update failed. Falling back to HTTP sync...")
 	}
-
-	syncViaHTTP(defaultRegistry, communityRegistry, registryFile, communityFile, stateFile, CurrentVersion)
+	
+	// Check for main app update from the 'official' registry if exists
+	for _, src := range sources {
+		if src.Name == "official" {
+			checkMainAppUpdate(filepath.Join(baseDir, src.File), stateFile, CurrentVersion)
+			break
+		}
+	}
 }
 
 func syncViaHTTP(defaultRegistry, communityRegistry, registryFile, communityFile, stateFile string, CurrentVersion string) {
@@ -92,6 +103,36 @@ func copyRegistryFile(src, dst string) {
 	fmt.Printf("  -> Synchronized: %s\n", filepath.Base(src))
 }
 
+func GetPendingUpdates(sources []RegistrySource, baseDir, stateFile string) []App {
+	var updates []App
+	
+	allStates := make(map[string]AppState)
+	stateData, err := os.ReadFile(stateFile)
+	if err == nil {
+		json.Unmarshal(stateData, &allStates)
+	}
+	if len(allStates) == 0 {
+		return updates
+	}
+
+	for _, src := range sources {
+		data, err := os.ReadFile(filepath.Join(baseDir, src.File))
+		if err == nil {
+			var reg Registry
+			json.Unmarshal(data, &reg)
+			for _, app := range reg.Apps {
+				if state, exists := allStates[app.Name]; exists {
+					if state.Version != app.Version {
+						updates = append(updates, app)
+					}
+				}
+			}
+		}
+	}
+	
+	return updates
+}
+
 func checkMainAppUpdate(registryFile, stateFile, CurrentVersion string) {
 	data, err := os.ReadFile(registryFile)
 	if err != nil {
@@ -106,8 +147,7 @@ func checkMainAppUpdate(registryFile, stateFile, CurrentVersion string) {
 	json.Unmarshal(stateData, &allStates)
 
 	for _, app := range reg.Apps {
-		if app.Name == "gosip" && app.Version != CurrentVersion {			// Note: selfUpdate is in main.go, not in registry package
-			// selfUpdate(app.Version, app.Repo)
+		if app.Name == "gosip" && app.Version != CurrentVersion {
 			return
 		}
 		if state, exists := allStates[app.Name]; exists && state.Version != app.Version {
